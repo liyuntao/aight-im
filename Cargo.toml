@@ -1,0 +1,11 @@
+[package]
+name = "b-chat"
+version = "0.1.0"
+authors = ["liyuntao <liyuntao58607@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures-preview = { version = "0.3.0-alpha.18", features = [ "async-await", "nightly" ] }
+async-std = "0.99"
