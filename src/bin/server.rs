@@ -1,10 +1,9 @@
 use async_std::{
     prelude::*,
+    io::BufReader,
     task,
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
-use async_std::io::BufReader;
-use async_std::net::TcpStream;
 use std::net::ToSocketAddrs;
 
 use futures::channel::mpsc;
@@ -23,7 +22,7 @@ async fn server(addr: impl ToSocketAddrs) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     let (broker_sender, broker_receiver) = mpsc::unbounded();
-    let _broker_handle = task::spawn(broker(broker_receiver));
+    let broker = task::spawn(broker(broker_receiver));
 
     println!("broker started");
     let mut incoming = listener.incoming();
@@ -32,9 +31,11 @@ async fn server(addr: impl ToSocketAddrs) -> Result<()> {
     while let Some(stream) = incoming.next().await {
         let stream = stream?;
         println!("Accepting from: {}", stream.peer_addr()?);
-//        let _handle = task::spawn(client_handler(stream));
         spawn_and_log_error(client(broker_sender.clone(), stream));
     }
+    drop(broker_sender);
+//    broker_sender.close(); // TODO: why
+    broker.await;
     println!("Server closed!!");
     Ok(())
 }
@@ -46,7 +47,14 @@ async fn client(mut broker: Sender<Event>, stream: TcpStream) -> Result<()> {
 
     let name = match lines.next().await {
         None => Err("peer disconnected immediately")?,
-        Some(line) => line?,
+        Some(line) =>{
+            let line = line?;
+            if line == "shit" {
+                Err("disable server")?
+            } else {
+                line
+            }
+        },
     };
     broker.send(Event::NewPeer { name: name.clone(), stream: Arc::clone(&stream)}).await.unwrap();
 
@@ -69,7 +77,7 @@ fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>
 {
     task::spawn(async move {
         if let Err(e) = fut.await {
-            eprintln!("{}", e)
+            eprintln!("task error: {}", e)
         }
     })
 }
@@ -101,6 +109,8 @@ enum Event {
 
 // actor model
 async fn broker(mut events: Receiver<Event>) -> Result<()> {
+    let mut writers = Vec::new();
+
     let mut peers: HashMap<String, Sender<String>> = HashMap::new();
 
     while let Some(event) = events.next().await {
@@ -118,12 +128,19 @@ async fn broker(mut events: Receiver<Event>) -> Result<()> {
                     Entry::Vacant(entry) => {
                         let (client_sender, client_receiver) = mpsc::unbounded();
                         entry.insert(client_sender);
-                        spawn_and_log_error(client_writer(client_receiver, stream));
+                        let handle = spawn_and_log_error(client_writer(client_receiver, stream));
+                        writers.push(handle);
                     }
                 }
             }
         }
     }
+    drop(peers); // TODO
+
+    for writer in writers {
+        writer.await;
+    }
+
     Ok(())
 }
 
