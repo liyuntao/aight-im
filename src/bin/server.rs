@@ -47,14 +47,7 @@ async fn client(mut broker: Sender<Event>, stream: TcpStream) -> Result<()> {
 
     let name = match lines.next().await {
         None => Err("peer disconnected immediately")?,
-        Some(line) =>{
-            let line = line?;
-            if line == "shit" {
-                Err("disable server")?
-            } else {
-                line
-            }
-        },
+        Some(line) => line?,
     };
     broker.send(Event::NewPeer { name: name.clone(), stream: Arc::clone(&stream)}).await.unwrap();
 
