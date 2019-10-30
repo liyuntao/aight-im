@@ -6,6 +6,14 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "server"
+path = "src/server/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client/client.rs"
+
 [dependencies]
 bytes = "0.4"
 futures-preview = "0.3.0-alpha.19"
