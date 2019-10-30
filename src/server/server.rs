@@ -5,12 +5,11 @@ use tokio::{io::{AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}, sync:
 use tokio_io::split;
 use tokio_io::split::WriteHalf;
 use std::collections::HashMap;
-use futures::{StreamExt, SinkExt};
+use futures::StreamExt;
 use std::collections::hash_map::Entry;
 use tokio::io::AsyncBufReadExt;
 use std::sync::{Arc};
 use tokio::sync::Mutex;
-use futures::async_await::assert_fused_stream;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 type Tx<T> = mpsc::UnboundedSender<T>;
@@ -25,13 +24,10 @@ async fn main() -> Result<()> {
 
     let broker = Arc::new(Mutex::new(Broker::new()));
 
-//    let (broker_sender, broker_receiver) = mpsc::unbounded_channel();
-//    let _broker_task = tokio::spawn(broker_handle(broker_receiver));
-
     loop { // accept loop
         let (socket, _) = listener.accept().await?;
         let broker = Arc::clone(&broker);
-        tokio::spawn(accept_handle_loop(broker,broker_sender.clone(), socket));
+        tokio::spawn(accept_handle_loop(broker,socket));
     }
 }
 
@@ -46,12 +42,11 @@ impl Broker {
         }
     }
 
-    async fn on_event(&mut self, event: Event) {
+    async fn on_event(&mut self, id: &str, event: Event) {
         match event {
-            Event::NewPeer { id, stream: mut write_half } => {
+            Event::NewPeer { stream: mut write_half } => {
                 println!("user login; id: {}", id);
-
-                match peers.entry(id) {
+                match self.peers.entry(id.to_string()) { // TODO duplicated copy here?
                     Entry::Occupied(..) => {
                         println!("!!another client incoming with same id; id: {}; shutdown now", id);
                         // send help msg to client-side
@@ -59,34 +54,39 @@ impl Broker {
                     },
                     Entry::Vacant(entry) => {
                         // hold session and session_status in hashmap
-                        entry.insert(Peer::new(write_half) );
+                        entry.insert(Peer::new(write_half, id.to_string() ) );
                     }
                 }
             }
-            Event::Message { id, to, msg } => {
+            Event::Message { to, msg } => {
                 if let Some(peer) = self.peers.get_mut(&to) {
                     let content = format!("msg from {}: {}\n", id, msg);
                     peer.socket.write_all(content.as_bytes()).await.unwrap();
                 }
             }
-            Event::Exit { id} => {
+            Event::Echo { msg } => {
+                if let Some(peer) = self.peers.get_mut(id) {
+                    peer.socket.write_all(msg.as_bytes()).await.unwrap();
+                }
+            }
+            Event::Exit => {
                 println!("client-side exited: id={};", id);
                 self.remove_peer(id);
             }
         }
     }
 
-    async fn remove_peer(&mut self, id: String) {
-        if let Some(peer) = self.peers.get_mut(&id) {
+    async fn remove_peer(&mut self, id: &str) {
+        if let Some(peer) = self.peers.get_mut(id) {
             peer.socket.shutdown().await;
-            self.peers.remove(&id);
+            self.peers.remove(id);
         }
     }
 }
 
 enum PeerStatus {
     Unauthorized,
-    Authorized(String), // id
+    Authorized(String),
 }
 struct Peer {
     socket: WriteHalf<TcpStream>,
@@ -94,13 +94,12 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(socket: WriteHalf<TcpStream>) -> Self {
-        Peer { socket, status: PeerStatus::Unauthorized }
+    fn new(socket: WriteHalf<TcpStream>, id: String) -> Self {
+        Peer { socket, status: PeerStatus::Authorized(id) }
     }
 }
 
 async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
-                            mut broker_tx: Tx<Event>,
                             socket: TcpStream,
 ) {
     // 1. read from socket & parsing
@@ -113,103 +112,55 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
         None => return,
         Some(line) => line.unwrap(),
     };
-    broker_tx.send(Event::NewPeer {
-        id,
-        stream: write_half,
-    },).await.unwrap();
+
+    {
+        let mut broker = broker.lock().await;
+        broker.on_event(&id, Event::NewPeer { stream: write_half }).await;
+    }
 
     // 3. transfer parsed events to broker
     while let Some(raw_line) = lines.next().await {
         let line = raw_line.unwrap();
+        println!("raw_line incoming: id={}, raw={}", id, line);
         if let Some(event) = parse_raw(line) {
-            broker_tx.try_send(event).unwrap();
+            let mut broker = broker.lock().await;
+            broker.on_event(&id, event).await;
         }
     }
 }
 
 fn parse_raw(line: String) -> Option<Event> {
-    println!("debug: raw line incoming: {}", line);
-
-    match line.find('|') {
-        None => {
-            None
-        },
-        Some(idx) => {
-            let (source_id, left) = (&line[..idx], line[idx + 1 ..].trim());
-            if left.starts_with(":to") {
-                let idx = left.find(' ')?;
-                let left = left[idx + 1 ..].trim();
-                let idx = left.find(' ')?;
-                let (target_id, content) = (&left[..idx], left[idx + 1 ..].trim());
-                Some( Event::Message {id: source_id.to_string(),
-                    to: target_id.to_string(),
-                    msg: content.to_string() })
-            } else if left.starts_with(":echo") {
-                let idx = left.find(' ')?;
-                let content = left[idx + 1 ..].trim();
-                Some( Event::Message {id: source_id.to_string(),
-                    to: source_id.to_string(),
-                    msg: content.to_string() })
-            } else if left.starts_with(":exit") {
-                Some(Event::Exit {id: source_id.to_string() })
-            } else {
-                None
-            }
-        },
+    if line.starts_with(":to") {
+        let idx = line.find(' ')?;
+        let left = line[idx + 1 ..].trim();
+        let idx = left.find(' ')?;
+        let (target_id, content) = (&left[..idx], left[idx + 1 ..].trim());
+        Some( Event::Message {
+            to: target_id.to_string(),
+            msg: content.to_string()
+        })
+    } else if line.starts_with(":echo") {
+        let idx = line.find(' ')?;
+        let content = line[idx + 1 ..].trim();
+        Some(Event::Echo { msg: content.to_string() })
+    } else if line.starts_with(":exit") {
+        Some(Event::Exit)
+    } else {
+        None
     }
 }
 
 #[derive(Debug)]
 enum Event {
     NewPeer {
-        id: String,
         stream: WriteHalf<TcpStream>,
     },
     Message {
-        id: String,
         to: String,
         msg: String,
     },
-    Exit {
-        id: String,
+    Echo {
+        msg: String,
     },
-}
-
-//async fn broker_handle(mut events: Rx<Event>) {
-//    let mut peers: HashMap<String, Tx<String>> = HashMap::new();
-//
-//    while let Some(event) = events.next().await {
-//        match event {
-//            Event::NewPeer { id, stream: write_half } => {
-//                println!("user login; id: {}", id);
-//
-//                match peers.entry(id) {
-//                    Entry::Occupied(..) => (),
-//                    Entry::Vacant(entry) => {
-//                        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-//                        entry.insert(peer_tx);
-//                        // TODO error handling
-//                        tokio::spawn(peer_handle(peer_rx, write_half));
-//                    }
-//                }
-//            }
-//            Event::Message { id, to, msg } => {
-//                if let Some(peer) = peers.get_mut(&to) {
-//                    let content = format!("msg from {}: {}\n", id, msg);
-//                    peer.send(content).await.unwrap();
-//                }
-//            }
-//            Event::Exit { id} => {
-//                println!("client disconnected; id: {}", id);
-//                // TODO close chain: on-exit-event -> channel -> socket??
-//            }
-//        }
-//    }
-//}
-
-async fn peer_handle(mut msg_out: Rx<String>, mut write_half: WriteHalf<TcpStream>) {
-    while let Some(msg) = msg_out.next().await {
-        println!("debug: msg to sb: {}", msg);
-        write_half.write_all(msg.as_bytes()).await.unwrap();
-    }
+    Exit,
 }

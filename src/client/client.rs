@@ -63,9 +63,9 @@ mod conn {
 
         // on connected
         w.write_all(id.as_bytes()).await?;
-        w.flush().await?;
-        let sink = FramedWrite::new(w, codec::Bytes);
+        w.flush().await?; // FIXME: problem!!
 
+        let sink = FramedWrite::new(w, codec::Bytes);
         let mut stream = FramedRead::new(r, codec::Bytes).filter_map(|i| match i {
             Ok(i) => future::ready(Some(i)),
             Err(e) => {
