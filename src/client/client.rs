@@ -62,7 +62,7 @@ mod conn {
         let (r, mut w) = stream.split();
 
         // on connected
-        w.write_all(id.as_bytes()).await?;
+        w.write_all(format!("{}\n", id).as_bytes()).await?;
         w.flush().await?; // FIXME: problem!!
 
         let sink = FramedWrite::new(w, codec::Bytes);
