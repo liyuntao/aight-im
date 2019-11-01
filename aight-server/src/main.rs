@@ -1,14 +1,21 @@
 #![allow(dead_code)]
-use std::error::Error;
-use tokio::{io::{AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}, sync::mpsc};
-use tokio_io::split;
-use tokio_io::split::WriteHalf;
-use std::collections::HashMap;
 use futures::StreamExt;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
-use std::sync::{Arc};
 use tokio::sync::Mutex;
+use tokio::{
+    io::{AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+};
+use tokio_io::split;
+use tokio_io::split::WriteHalf;
+
+#[macro_use]
+extern crate log;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 type Tx<T> = mpsc::UnboundedSender<T>;
@@ -16,17 +23,20 @@ type Rx<T> = mpsc::UnboundedReceiver<T>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+
     let addr = "127.0.0.1:8080".to_string();
 
     let mut listener = TcpListener::bind(&addr).await?;
-    println!("Aight-Server is listing on 8080");
+    info!("Aight-Server is listing on 8080");
 
     let broker = Arc::new(Mutex::new(Broker::new()));
 
-    loop { // accept loop
+    loop {
+        // accept loop
         let (socket, _) = listener.accept().await?;
         let broker = Arc::clone(&broker);
-        tokio::spawn(accept_handle_loop(broker,socket));
+        tokio::spawn(accept_handle_loop(broker, socket));
     }
 }
 
@@ -43,17 +53,29 @@ impl Broker {
 
     async fn on_event(&mut self, id: &str, event: Event) {
         match event {
-            Event::NewPeer { stream: mut write_half } => {
-                println!("user login; id: {}", id);
-                match self.peers.entry(id.to_string()) { // TODO duplicated copy here?
+            Event::NewPeer {
+                stream: mut write_half,
+            } => {
+                debug!("user login. id={}", id);
+                match self.peers.entry(id.to_string()) {
+                    // TODO duplicated copy here?
                     Entry::Occupied(..) => {
-                        println!("!!another client incoming with same id; id: {}; shutdown now", id);
+                        debug!(
+                            "another client connected with same id! id={}; refuse connection",
+                            id
+                        );
+                        write_half
+                            .write_all(
+                                "another client with same id is online. connection refused."
+                                    .as_bytes(),
+                            )
+                            .await;
                         // send help msg to client-side
                         write_half.shutdown().await;
-                    },
+                    }
                     Entry::Vacant(entry) => {
                         // hold session and session_status in hashmap
-                        entry.insert(Peer::new(write_half, id.to_string() ) );
+                        entry.insert(Peer::new(write_half, id.to_string()));
                     }
                 }
             }
@@ -69,8 +91,7 @@ impl Broker {
                 }
             }
             Event::Exit => {
-                println!("client-side exited: id={};", id);
-                self.remove_peer(id);
+                self.remove_peer(id).await;
             }
         }
     }
@@ -94,13 +115,14 @@ struct Peer {
 
 impl Peer {
     fn new(socket: WriteHalf<TcpStream>, id: String) -> Self {
-        Peer { socket, status: PeerStatus::Authorized(id) }
+        Peer {
+            socket,
+            status: PeerStatus::Authorized(id),
+        }
     }
 }
 
-async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
-                            socket: TcpStream,
-) {
+async fn accept_handle_loop(broker: Arc<Mutex<Broker>>, socket: TcpStream) {
     // 1. read from socket & parsing
     let (read_half, write_half) = split::split(socket);
     let reader = BufReader::new(read_half);
@@ -110,20 +132,22 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
     let id = match lines.next().await {
         None => {
             // no id coming, peer disconnected immediately
-            return
-        },
+            return;
+        }
         Some(line) => line.unwrap(),
     };
 
     {
         let mut broker = broker.lock().await;
-        broker.on_event(&id, Event::NewPeer { stream: write_half }).await;
+        broker
+            .on_event(&id, Event::NewPeer { stream: write_half })
+            .await;
     }
 
     // 3. transfer parsed events to broker
     while let Some(raw_line) = lines.next().await {
         let line = raw_line.unwrap();
-        println!("raw_line incoming: id={}, raw={}", id, line);
+        trace!("raw_line incoming: id={}, raw={}", id, line);
         if let Some(event) = parse_raw(line) {
             let mut broker = broker.lock().await;
             broker.on_event(&id, event).await;
@@ -132,7 +156,7 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
 
     // if logic goes here, means this connection is closed.
     {
-        println!("peer closed!! id={}", id);
+        debug!("peer closed!! id={}", id);
         let mut broker = broker.lock().await;
         broker.remove_peer(&id).await;
     }
@@ -141,17 +165,19 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
 fn parse_raw(line: String) -> Option<Event> {
     if line.starts_with(":to") {
         let idx = line.find(' ')?;
-        let left = line[idx + 1 ..].trim();
+        let left = line[idx + 1..].trim();
         let idx = left.find(' ')?;
-        let (target_id, content) = (&left[..idx], left[idx + 1 ..].trim());
-        Some( Event::Message {
+        let (target_id, content) = (&left[..idx], left[idx + 1..].trim());
+        Some(Event::Message {
             to: target_id.to_string(),
-            msg: content.to_string()
+            msg: content.to_string(),
         })
     } else if line.starts_with(":echo") {
         let idx = line.find(' ')?;
-        let content = line[idx + 1 ..].trim();
-        Some(Event::Echo { msg: content.to_string() })
+        let content = line[idx + 1..].trim();
+        Some(Event::Echo {
+            msg: content.to_string(),
+        })
     } else if line.starts_with(":exit") {
         Some(Event::Exit)
     } else {
@@ -161,15 +187,8 @@ fn parse_raw(line: String) -> Option<Event> {
 
 #[derive(Debug)]
 enum Event {
-    NewPeer {
-        stream: WriteHalf<TcpStream>,
-    },
-    Message {
-        to: String,
-        msg: String,
-    },
-    Echo {
-        msg: String,
-    },
+    NewPeer { stream: WriteHalf<TcpStream> },
+    Message { to: String, msg: String },
+    Echo { msg: String },
     Exit,
 }
