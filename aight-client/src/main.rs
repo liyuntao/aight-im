@@ -51,6 +51,7 @@ mod conn {
         codec::{FramedRead, FramedWrite},
         net::TcpStream,
     };
+    use colored::*;
 
     pub async fn connect(
         id: String,
@@ -63,11 +64,15 @@ mod conn {
 
         // on connected
         w.write_all(format!("{}\n", id).as_bytes()).await?;
-        w.flush().await?; // FIXME: problem!!
+        w.flush().await?;
 
         let sink = FramedWrite::new(w, codec::Bytes);
         let mut stream = FramedRead::new(r, codec::Bytes).filter_map(|i| match i {
-            Ok(i) => future::ready(Some(i)),
+            Ok(i) => {
+                let colored_str = String::from_utf8(i).unwrap().green();
+                let out_bytes = format!("> {}\n", colored_str).into_bytes();
+                future::ready(Some(out_bytes))
+            },
             Err(e) => {
                 println!("failed to read from socket; error={}", e);
                 future::ready(None)

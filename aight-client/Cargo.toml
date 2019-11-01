@@ -1,21 +1,13 @@
 [package]
-name = "aight-im"
+name = "aight-client"
 version = "0.1.0"
 authors = ["liyuntao <liyuntao58607@gmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[[bin]]
-name = "server"
-path = "src/server/server.rs"
-
-[[bin]]
-name = "client"
-path = "src/client/client.rs"
-
 [dependencies]
 bytes = "0.4"
+colored = "1.8"
 futures-preview = "0.3.0-alpha.19"
 tokio = "0.2.0-alpha.6"
-tokio-io = "0.2.0-alpha.6"

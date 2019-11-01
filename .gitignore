@@ -1,4 +1,6 @@
 /target/
+/aight-client/target/
+/aight-server/target/
 **/*.rs.bk
 .idea/
 *.tar.gz
