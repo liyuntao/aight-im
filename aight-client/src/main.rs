@@ -1,4 +1,5 @@
 use futures::executor::LocalPool;
+use std::env;
 use std::error::Error;
 use tokio::{
     codec::{FramedRead, FramedWrite},
@@ -6,7 +7,6 @@ use tokio::{
     prelude::*,
     sync::mpsc,
 };
-use std::env;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -16,7 +16,9 @@ async fn main() -> Result<()> {
 }
 
 async fn run_client() -> Result<()> {
-    let id = env::args().nth(1).expect("must provide an user_id, e.g. client tom");
+    let id = env::args()
+        .nth(1)
+        .expect("must provide an user_id, e.g. client tom");
     println!("Aight-Client is started with id: {}", id);
     let stdin = async_stdin();
     let stdout = FramedWrite::new(io::stdout(), codec::Bytes);
@@ -33,25 +35,17 @@ fn async_stdin() -> impl Stream<Item = std::result::Result<Vec<u8>, io::Error>> 
     rx
 }
 
-//fn async_stdin2() -> impl Stream<Item = std::result::Result<Vec<u8>, io::Error>> + Unpin {
-//    tokio::codec::FramedRead::new(io::stdin(), tokio::codec::BytesCodec::new())
-//        // convert our bytes buffer into a stream that emits one byte at a time:
-//        .map(|bytes| stream::iter_ok::<_, io::Error>(bytes))
-//        // flatten our stream of streams down into one stream:
-//        .flatten()
-//}
-
 mod conn {
     use super::codec;
+    use colored::*;
     use futures::{future, Sink, SinkExt, Stream, StreamExt};
     use std::net::SocketAddr;
     use std::{error::Error, io};
     use tokio::{
-        io::{AsyncWriteExt},
         codec::{FramedRead, FramedWrite},
+        io::AsyncWriteExt,
         net::TcpStream,
     };
-    use colored::*;
 
     pub async fn connect(
         id: String,
@@ -72,7 +66,7 @@ mod conn {
                 let colored_str = String::from_utf8(i).unwrap().green();
                 let out_bytes = format!("> {}\n", colored_str).into_bytes();
                 future::ready(Some(out_bytes))
-            },
+            }
             Err(e) => {
                 println!("failed to read from socket; error={}", e);
                 future::ready(None)
