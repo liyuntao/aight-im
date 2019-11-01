@@ -108,7 +108,10 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
 
     // 2. hold connection/session
     let id = match lines.next().await {
-        None => return,
+        None => {
+            // no id coming, peer disconnected immediately
+            return
+        },
         Some(line) => line.unwrap(),
     };
 
@@ -125,6 +128,13 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>,
             let mut broker = broker.lock().await;
             broker.on_event(&id, event).await;
         }
+    }
+
+    // if logic goes here, means this connection is closed.
+    {
+        println!("peer closed!! id={}", id);
+        let mut broker = broker.lock().await;
+        broker.remove_peer(&id).await;
     }
 }
 
