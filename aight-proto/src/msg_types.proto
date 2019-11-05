@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package aight_proto.msg_types;
+
+message RawTcpMessage {
+  int32 type_id = 1;
+  bytes body = 2;
+}
+
+message Login {
+  string id = 1;
+}
+
+message EchoRequest {
+  string body = 1;
+}
+
+message MsgSendRequest {
+  string to_id = 1;
+  string body = 2;
+}
