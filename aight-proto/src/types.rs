@@ -1,6 +1,6 @@
-use bytes::BytesMut;
-use prost::Message;
-include!(concat!(env!("OUT_DIR"), "/aight_proto.msg_types.rs"));
+use bytes::{BytesMut, IntoBuf};
+use prost::{DecodeError, Message};
+include!(concat!(env!("OUT_DIR"), "/aight_proto.types.rs"));
 
 pub enum TypeID {
     Login = 1,
@@ -27,4 +27,8 @@ fn to_raw<T: Message>(type_id: i32, msg: T) -> RawTcpMessage {
         type_id,
         body: buffer.to_vec(),
     }
+}
+
+pub fn parse_raw_msg<B: IntoBuf, T: Message + Default>(bytes: B) -> Result<T, DecodeError> {
+    T::decode(bytes)
 }

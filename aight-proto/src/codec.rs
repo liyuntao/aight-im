@@ -26,12 +26,6 @@ impl Encoder for ProtobufFrameCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Self::Item, buf: &mut BytesMut) -> Result<(), Self::Error> {
-        let len = item.encoded_len();
-
-        if buf.remaining_mut() < len {
-            buf.reserve(len);
-        }
-
         item.encode_length_delimited(buf)
             .map_err(|_| unreachable!("Message only errors if not enough space"))
     }
@@ -42,9 +36,13 @@ impl Decoder for ProtobufFrameCodec {
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        Message::decode_length_delimited(buf.take())
-            .map(Option::Some)
-            .map_err(|err| err.into())
+        if buf.len() > 0 {
+            Message::decode_length_delimited(buf.take())
+                .map(Option::Some)
+                .map_err(|err| err.into())
+        } else {
+            Ok(None)
+        }
     }
 }
 

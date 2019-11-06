@@ -13,6 +13,9 @@ use tokio::{
 };
 use tokio_io::split;
 use tokio_io::split::WriteHalf;
+use tokio::codec::FramedRead;
+use aight_proto::codec;
+use aight_proto::types::*;
 
 #[macro_use]
 extern crate log;
@@ -51,9 +54,9 @@ impl Broker {
         }
     }
 
-    async fn on_event(&mut self, id: &str, event: Event) {
+    async fn on_event(&mut self, id: &str, event: ServerEvent) {
         match event {
-            Event::NewPeer {
+            ServerEvent::NewPeer {
                 stream: mut write_half,
             } => {
                 debug!("user login. id={}", id);
@@ -79,20 +82,21 @@ impl Broker {
                     }
                 }
             }
-            Event::Message { to, msg } => {
+            ServerEvent::Message { to, msg } => {
                 if let Some(peer) = self.peers.get_mut(&to) {
                     let content = format!("msg from {}: {}\n", id, msg);
                     peer.socket.write_all(content.as_bytes()).await.unwrap();
                 }
             }
-            Event::Echo { msg } => {
+            ServerEvent::Echo { msg } => {
                 if let Some(peer) = self.peers.get_mut(id) {
                     peer.socket.write_all(msg.as_bytes()).await.unwrap();
                 }
             }
-            Event::Exit => {
+            ServerEvent::Exit => {
                 self.remove_peer(id).await;
             }
+            _ => {},
         }
     }
 
@@ -125,32 +129,44 @@ impl Peer {
 async fn accept_handle_loop(broker: Arc<Mutex<Broker>>, socket: TcpStream) {
     // 1. read from socket & parsing
     let (read_half, write_half) = split::split(socket);
-    let reader = BufReader::new(read_half);
-    let mut lines = reader.lines();
+    let mut reader = FramedRead::new(read_half, codec::ProtobufFrameCodec::new());
+
+    let first_msg = reader.next().await;
 
     // 2. hold connection/session
-    let id = match lines.next().await {
+    let id = match first_msg {
         None => {
             // no id coming, peer disconnected immediately
             return;
         }
-        Some(line) => line.unwrap(),
+        Some(msg) => {
+            let first_msg = parse_raw_to_event(msg.unwrap());
+            if let ServerEvent::Login { id }  = first_msg {
+                id
+            } else {
+                return;
+            }
+        },
     };
 
     {
         let mut broker = broker.lock().await;
         broker
-            .on_event(&id, Event::NewPeer { stream: write_half })
+            .on_event(&id, ServerEvent::NewPeer { stream: write_half })
             .await;
     }
 
     // 3. transfer parsed events to broker
-    while let Some(raw_line) = lines.next().await {
-        let line = raw_line.unwrap();
-        trace!("raw_line incoming: id={}, raw={}", id, line);
-        if let Some(event) = parse_raw(line) {
-            let mut broker = broker.lock().await;
-            broker.on_event(&id, event).await;
+    while let Some(raw_msg) = reader.next().await {
+        match raw_msg {
+            Ok(raw_msg) => {
+                let event = parse_raw_to_event(raw_msg);
+                let mut broker = broker.lock().await;
+                broker.on_event(&id, event).await;
+            },
+            Err(e) => {
+                error!("error while decode bytes: {}", e);
+            }
         }
     }
 
@@ -162,33 +178,30 @@ async fn accept_handle_loop(broker: Arc<Mutex<Broker>>, socket: TcpStream) {
     }
 }
 
-fn parse_raw(line: String) -> Option<Event> {
-    if line.starts_with(":to") {
-        let idx = line.find(' ')?;
-        let left = line[idx + 1..].trim();
-        let idx = left.find(' ')?;
-        let (target_id, content) = (&left[..idx], left[idx + 1..].trim());
-        Some(Event::Message {
-            to: target_id.to_string(),
-            msg: content.to_string(),
-        })
-    } else if line.starts_with(":echo") {
-        let idx = line.find(' ')?;
-        let content = line[idx + 1..].trim();
-        Some(Event::Echo {
-            msg: content.to_string(),
-        })
-    } else if line.starts_with(":exit") {
-        Some(Event::Exit)
+fn parse_raw_to_event(raw: RawTcpMessage) -> ServerEvent {
+    let type_id = raw.type_id;
+    let bytes = raw.body;
+
+    if type_id == 1 {
+        let msg: Login = parse_raw_msg(bytes).unwrap();
+        ServerEvent::Login { id: msg.id }
+    } else if type_id == 2 {
+        let msg: EchoRequest = parse_raw_msg(bytes).unwrap();
+        ServerEvent::Echo { msg: msg.body }
+    } else if type_id == 3 {
+        let msg: EchoRequest = parse_raw_msg(bytes).unwrap();
+        ServerEvent::Echo { msg: msg.body }
     } else {
-        None
+        ServerEvent::Unknown
     }
 }
 
 #[derive(Debug)]
-enum Event {
+enum ServerEvent {
     NewPeer { stream: WriteHalf<TcpStream> },
+    Login { id: String },
     Message { to: String, msg: String },
     Echo { msg: String },
+    Unknown,
     Exit,
 }

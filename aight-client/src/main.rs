@@ -7,6 +7,9 @@ use tokio::{
     sync::mpsc,
 };
 
+#[macro_use]
+extern crate log;
+
 use aight_proto::codec;
 use aight_proto::types::*;
 use colored::*;
@@ -17,6 +20,7 @@ use tokio::codec::LinesCodecError;
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     LocalPool::new().run_until(run_client());
 }
 
@@ -61,7 +65,10 @@ async fn transform(
     res.map(parse_line_to_msg)
         .map_err(|e| match e {
             LinesCodecError::MaxLineLengthExceeded => io::Error::from(ErrorKind::Other),
-            LinesCodecError::Io(e) => e,
+            LinesCodecError::Io(e) => {
+                error!{"error while encoding raw_msg {}", e};
+                e
+            },
         })
         .transpose()
 }
@@ -75,9 +82,10 @@ pub async fn connect(
     let mut stream = TcpStream::connect(addr).await?;
     let (socket_r, socket_w) = stream.split();
 
-    let mut sink = FramedWrite::new(socket_w, codec::ProtobufFrameCodec);
+    let mut sink = FramedWrite::new(socket_w, codec::ProtobufFrameCodec::new());
     // on connected, send LoginReq
     sink.send(create_login(id)).await;
+    sink.flush().await;
 
     let mut stream = FramedRead::new(socket_r, codec::Bytes).filter_map(|i| match i {
         Ok(i) => {
