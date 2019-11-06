@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package aight_proto.msg_types;
+package aight_proto.types;
 
 message RawTcpMessage {
   int32 type_id = 1;

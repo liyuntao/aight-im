@@ -1,3 +1,3 @@
 fn main() {
-    prost_build::compile_protos(&["src/msg_types.proto"], &["src/"]).unwrap();
+    prost_build::compile_protos(&["src/types.proto"], &["src/"]).unwrap();
 }

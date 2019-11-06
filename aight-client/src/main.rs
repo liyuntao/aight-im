@@ -4,19 +4,16 @@ use tokio::{
     codec::{FramedRead, FramedWrite, LinesCodec},
     io,
     net::TcpStream,
-    prelude::*,
     sync::mpsc,
 };
 
-use aight_proto::msg_types::*;
+use aight_proto::codec;
+use aight_proto::types::*;
 use colored::*;
 use futures::{future, Sink, SinkExt, Stream, StreamExt};
-use prost::Message;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::codec::LinesCodecError;
-
-mod codec;
 
 #[tokio::main]
 async fn main() {
@@ -76,7 +73,7 @@ pub async fn connect(
     mut stdout: impl Sink<Vec<u8>, Error = io::Error> + Unpin,
 ) -> Result<(), Box<dyn Error>> {
     let mut stream = TcpStream::connect(addr).await?;
-    let (socket_r, mut socket_w) = stream.split();
+    let (socket_r, socket_w) = stream.split();
 
     let mut sink = FramedWrite::new(socket_w, codec::ProtobufFrameCodec);
     // on connected, send LoginReq

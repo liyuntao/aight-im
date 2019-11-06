@@ -1,8 +1,8 @@
-use aight_proto::msg_types::RawTcpMessage;
+use crate::types::RawTcpMessage;
 use bytes::{BufMut, BytesMut};
-use prost::{DecodeError, Message};
+use prost::Message;
 use std::io;
-use tokio::codec::{Decoder, Encoder};
+use tokio_codec::{Decoder, Encoder};
 
 // A codec that splits the received ByteBufs dynamically by the value of
 // the Google Protocol Buffers Base 128 Varints integer length field in the message.
