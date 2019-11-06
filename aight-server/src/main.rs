@@ -189,8 +189,8 @@ fn parse_raw_to_event(raw: RawTcpMessage) -> ServerEvent {
         let msg: EchoRequest = parse_raw_msg(bytes).unwrap();
         ServerEvent::Echo { msg: msg.body }
     } else if type_id == 3 {
-        let msg: EchoRequest = parse_raw_msg(bytes).unwrap();
-        ServerEvent::Echo { msg: msg.body }
+        let msg: MsgSendRequest = parse_raw_msg(bytes).unwrap();
+        ServerEvent::Message { to: msg.to_id, msg: msg.body }
     } else {
         ServerEvent::Unknown
     }
