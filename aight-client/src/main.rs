@@ -1,33 +1,40 @@
 use futures::executor::LocalPool;
-use std::env;
-use std::error::Error;
+use std::{env, error::Error};
 use tokio::{
-    codec::{FramedRead, FramedWrite},
+    codec::{FramedRead, FramedWrite, LinesCodec},
     io,
+    net::TcpStream,
     prelude::*,
     sync::mpsc,
 };
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+use aight_proto::msg_types::*;
+use colored::*;
+use futures::{future, Sink, SinkExt, Stream, StreamExt};
+use prost::Message;
+use std::io::ErrorKind;
+use std::net::SocketAddr;
+use tokio::codec::LinesCodecError;
+
+mod codec;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    LocalPool::new().run_until(run_client())
+async fn main() {
+    LocalPool::new().run_until(run_client());
 }
 
-async fn run_client() -> Result<()> {
+async fn run_client() {
     let id = env::args()
         .nth(1)
         .expect("must provide an user_id, e.g. client tom");
     println!("Aight-Client is started with id: {}", id);
     let stdin = async_stdin();
     let stdout = FramedWrite::new(io::stdout(), codec::Bytes);
-    conn::connect(id, &"127.0.0.1:8080".parse().unwrap(), stdin, stdout).await?;
-    Ok(())
+    connect(id, &"127.0.0.1:8080".parse().unwrap(), stdin, stdout).await;
 }
 
-fn async_stdin() -> impl Stream<Item = std::result::Result<Vec<u8>, io::Error>> + Unpin {
-    let mut stdin = FramedRead::new(io::stdin(), codec::Bytes);
+fn async_stdin() -> impl Stream<Item = std::result::Result<String, LinesCodecError>> + Unpin {
+    let mut stdin = FramedRead::new(io::stdin(), LinesCodec::new());
     let (mut tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         tx.send_all(&mut stdin).await.unwrap();
@@ -35,79 +42,65 @@ fn async_stdin() -> impl Stream<Item = std::result::Result<Vec<u8>, io::Error>> 
     rx
 }
 
-mod conn {
-    use super::codec;
-    use colored::*;
-    use futures::{future, Sink, SinkExt, Stream, StreamExt};
-    use std::net::SocketAddr;
-    use std::{error::Error, io};
-    use tokio::{
-        codec::{FramedRead, FramedWrite},
-        io::AsyncWriteExt,
-        net::TcpStream,
-    };
-
-    pub async fn connect(
-        id: String,
-        addr: &SocketAddr,
-        stdin: impl Stream<Item = Result<Vec<u8>, io::Error>> + Unpin,
-        mut stdout: impl Sink<Vec<u8>, Error = io::Error> + Unpin,
-    ) -> Result<(), Box<dyn Error>> {
-        let mut stream = TcpStream::connect(addr).await?;
-        let (r, mut w) = stream.split();
-
-        // on connected
-        w.write_all(format!("{}\n", id).as_bytes()).await?;
-        w.flush().await?;
-
-        let sink = FramedWrite::new(w, codec::Bytes);
-        let mut stream = FramedRead::new(r, codec::Bytes).filter_map(|i| match i {
-            Ok(i) => {
-                let colored_str = String::from_utf8(i).unwrap().green();
-                let out_bytes = format!("> {}\n", colored_str).into_bytes();
-                future::ready(Some(out_bytes))
-            }
-            Err(e) => {
-                println!("failed to read from socket; error={}", e);
-                future::ready(None)
-            }
-        });
-
-        match future::join(stdin.forward(sink), stdout.send_all(&mut stream)).await {
-            (Err(e), _) | (_, Err(e)) => Err(e.into()),
-            _ => Ok(()),
-        }
+fn parse_line_to_msg(line: String) -> Option<RawTcpMessage> {
+    if line.starts_with(":to") {
+        let idx = line.find(' ')?;
+        let left = line[idx + 1..].trim();
+        let idx = left.find(' ')?;
+        let (target_id, content) = (&left[..idx], left[idx + 1..].trim());
+        Some(create_send(target_id.to_string(), content.to_string()))
+    } else if line.starts_with(":echo") {
+        let idx = line.find(' ')?;
+        let content = line[idx + 1..].trim();
+        Some(create_echo(content.to_string()))
+    } else {
+        None
     }
 }
 
-mod codec {
-    use bytes::{BufMut, BytesMut};
-    use std::io;
-    use tokio::codec::{Decoder, Encoder};
+async fn transform(
+    res: Result<String, LinesCodecError>,
+) -> Option<Result<RawTcpMessage, io::Error>> {
+    res.map(parse_line_to_msg)
+        .map_err(|e| match e {
+            LinesCodecError::MaxLineLengthExceeded => io::Error::from(ErrorKind::Other),
+            LinesCodecError::Io(e) => e,
+        })
+        .transpose()
+}
 
-    pub struct Bytes;
+pub async fn connect(
+    id: String,
+    addr: &SocketAddr,
+    stdin: impl Stream<Item = std::result::Result<String, LinesCodecError>> + Unpin,
+    mut stdout: impl Sink<Vec<u8>, Error = io::Error> + Unpin,
+) -> Result<(), Box<dyn Error>> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let (socket_r, mut socket_w) = stream.split();
 
-    impl Decoder for Bytes {
-        type Item = Vec<u8>;
-        type Error = io::Error;
+    let mut sink = FramedWrite::new(socket_w, codec::ProtobufFrameCodec);
+    // on connected, send LoginReq
+    sink.send(create_login(id)).await;
 
-        fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<Vec<u8>>> {
-            if buf.len() > 0 {
-                let len = buf.len();
-                Ok(Some(buf.split_to(len).into_iter().collect()))
-            } else {
-                Ok(None)
-            }
+    let mut stream = FramedRead::new(socket_r, codec::Bytes).filter_map(|i| match i {
+        Ok(i) => {
+            let colored_str = String::from_utf8(i).unwrap().green();
+            let out_bytes = format!("> {}\n", colored_str).into_bytes();
+            future::ready(Some(out_bytes))
         }
-    }
-
-    impl Encoder for Bytes {
-        type Item = Vec<u8>;
-        type Error = io::Error;
-
-        fn encode(&mut self, data: Vec<u8>, buf: &mut BytesMut) -> io::Result<()> {
-            buf.put(&data[..]);
-            Ok(())
+        Err(e) => {
+            println!("failed to read from socket; error={}", e);
+            future::ready(None)
         }
+    });
+
+    match future::join(
+        stdin.filter_map(transform).forward(sink),
+        stdout.send_all(&mut stream),
+    )
+    .await
+    {
+        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+        _ => Ok(()),
     }
 }
